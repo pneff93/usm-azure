@@ -1,9 +1,11 @@
-# Confluent Platform on AKS → Confluent Cloud with Unified Stream Manager (USM)
+# Self-managed Connect on AKS → Confluent Cloud Kafka, monitored with Unified Stream Manager (USM)
 
-A step-by-step demo in two phases:
+A step-by-step demo for a **different scenario** than the `main` branch: there is **no Confluent Platform Kafka cluster**. Only a **self-managed Kafka Connect cluster** runs on Azure Kubernetes Service (AKS), using Confluent for Kubernetes (CFK). It bootstraps against a **Confluent Cloud Kafka cluster** and is monitored in Confluent Cloud with **Unified Stream Manager**.
 
-- **Phase A:** run a self-managed Confluent Platform (CP) cluster on Azure Kubernetes Service (AKS), using Confluent for Kubernetes (CFK).
-- **Phase B:** connect that cluster to Confluent Cloud with **Unified Stream Manager**, over **Azure Private Link**.
+- **Phase A:** AKS cluster and Confluent for Kubernetes.
+- **Phase B:** Confluent Cloud: Kafka cluster, USM Private Link for the agent, topic, service accounts.
+- **Phase C:** deploy the USM Agent, Connect and a Datagen connector on AKS.
+- **Phase D:** register the Connect cluster with USM.
 
 **How the steps work**
 - Azure and Confluent Cloud steps use the **Portal / Cloud Console**. The CLI version is in a collapsed *CLI alternative* note.
@@ -16,18 +18,21 @@ A step-by-step demo in two phases:
 - [References](#references)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
-- **Phase A: Confluent Platform on AKS**
+- **Phase A: AKS and Confluent for Kubernetes**
   - [A1. Create the AKS cluster and namespace](#a1-create-the-aks-cluster-and-namespace)
   - [A2. Install Confluent for Kubernetes](#a2-install-confluent-for-kubernetes)
-  - [A3. Deploy Confluent Platform](#a3-deploy-confluent-platform)
-  - [A4. Demo data with Datagen](#a4-demo-data-with-datagen)
-- **Phase B: Connect to Confluent Cloud with USM**
+- **Phase B: Confluent Cloud**
+  - [B0. Create the Kafka cluster](#b0-create-the-kafka-cluster)
   - [B1. USM setup wizard and Private Link](#b1-usm-setup-wizard-and-private-link)
-  - [B2. Kubernetes secret](#b2-kubernetes-secret)
-  - [B3. Deploy the USM Agent](#b3-deploy-the-usm-agent)
-  - [B4. Register the Kafka cluster](#b4-register-the-kafka-cluster)
-  - [B5. Connect Kafka to the USM Agent](#b5-connect-kafka-to-the-usm-agent)
-  - [B6. Optional: add the Connect cluster](#b6-optional-add-the-connect-cluster)
+  - [B2. Create the topic](#b2-create-the-topic)
+  - [B3. Service account for Connect](#b3-service-account-for-connect)
+- **Phase C: Deploy on AKS**
+  - [C1. Kubernetes secrets](#c1-kubernetes-secrets)
+  - [C2. Deploy the USM Agent](#c2-deploy-the-usm-agent)
+  - [C3. Deploy Connect](#c3-deploy-connect)
+  - [C4. Demo data with Datagen](#c4-demo-data-with-datagen)
+- **Phase D: Register Connect with USM**
+  - [D1. Register the Connect cluster](#d1-register-the-connect-cluster)
 - [Cleanup](#cleanup)
 
 ---
@@ -35,21 +40,24 @@ A step-by-step demo in two phases:
 ## References
 
 1. [USM in Confluent Cloud](https://docs.confluent.io/cloud/current/usm/overview.html): registration, Azure private networking, agent setup, monitoring, troubleshooting.
-2. [USM in Confluent Platform](https://docs.confluent.io/usm/current/overview.html): supported versions, the metrics and metadata that are sent, agent sizing.
-3. [Confluent for Kubernetes](https://docs.confluent.io/operator/current/overview.html): deploying CFK, configuring USM, the compatibility matrix.
-4. [CFK USM examples](https://github.com/confluentinc/confluent-kubernetes-examples/tree/master/hybrid/usmagent): the manifests this demo is based on, including authentication variants.
-5. [Azure Kubernetes Service](https://learn.microsoft.com/azure/aks/): creating a cluster, networking, connecting with `kubectl`.
+2. [Register a self-managed Connect cluster with Confluent Cloud Kafka as the metadata cluster](https://docs.confluent.io/cloud/current/usm/register-connect/cloud-kafka.html): the registration flow this scenario follows.
+3. [USM in Confluent Platform](https://docs.confluent.io/usm/current/overview.html): supported versions, the metrics and metadata that are sent, agent sizing.
+4. [Confluent for Kubernetes](https://docs.confluent.io/operator/current/overview.html): deploying CFK, configuring USM, the compatibility matrix.
+5. [CFK hybrid examples](https://github.com/confluentinc/confluent-kubernetes-examples/tree/master/hybrid): self-managed Connect against Confluent Cloud, and the USM Agent manifests.
+6. [Azure Kubernetes Service](https://learn.microsoft.com/azure/aks/): creating a cluster, networking, connecting with `kubectl`.
 
 ---
 
 ## Architecture
 
-![Architecture](images/architecture.png)
-<!-- TODO screenshot: architecture from the demo -->
+![Architecture](images/architecture-connect-cc.png)
+<!-- TODO screenshot: architecture for the Connect-only scenario -->
 
-- **Confluent Cloud is the control plane** (monitoring, catalog). Your CP cluster stays the **data plane**, so **message payloads never leave it**. Only metadata, configs and metrics are sent.
-- The **USM Agent** (Envoy-based) is the **single outbound path** from CP to Confluent Cloud. KRaft controllers send metadata events, brokers send metrics, Connect sends connector metadata. Confluent Cloud can't send commands back into your cluster.
-- **Private networking is mandatory.** On Azure: an **Ingress PrivateLink Gateway** and an **Access Point** in Confluent Cloud, a **Private Endpoint** in the AKS VNet, and a **Private DNS zone**.
+- **Two separate paths leave AKS:**
+  - **Data path (public internet):** Connect produces to and consumes from the Confluent Cloud Kafka cluster (SASL_SSL, API key) and uses Confluent Cloud Schema Registry (HTTPS, API key). The Connect internal topics (configs, offsets, status) live in Confluent Cloud too.
+  - **USM path (Azure Private Link):** Connect workers send connector metadata and metrics to the **USM Agent** in the same AKS cluster. The agent forwards them to Confluent Cloud over Private Link.
+- **No Confluent Platform Kafka.** In USM terms, the Confluent Cloud cluster is the Connect cluster's **metadata cluster**. Only the Connect cluster is registered; the Cloud Kafka cluster needs no registration.
+- **Private networking is mandatory for USM, even with a public Kafka cluster.** On Azure: an **Ingress PrivateLink Gateway** and an **Access Point** in Confluent Cloud, a **Private Endpoint** in the AKS VNet, and a **Private DNS zone**.
 
 ---
 
@@ -57,20 +65,23 @@ A step-by-step demo in two phases:
 
 | Component | Version | Note |
 |---|---|---|
-| Confluent Platform | **8.2.4** | USM needs CP 7.9.6+ or 8.1.0+. 8.0.x is unsupported. 8.2.0–8.2.2 miss some Connect metrics. |
-| USM Agent | **1.2.1** | If it misbehaves under CFK, try `cp-usm-agent:1.1.1` in [`20-usmagent.yaml`](k8s/usm/20-usmagent.yaml). |
+| Confluent Platform (Connect) | **8.2.4** | Not affected by the "Connect metrics missing from USM" issue (7.9.6–7.9.8, 8.1.2–8.1.4, 8.2.0–8.2.2 and 8.3.0 are). |
+| USM Agent | **1.2.1** | If it misbehaves under CFK, try `cp-usm-agent:1.1.1` in [`10-usmagent.yaml`](k8s/connect-cc/10-usmagent.yaml). |
 | CFK | **3.3.1** (Helm chart `0.1718.99`) | |
 | Datagen connector | 0.7.2 | |
+
+**Confluent Cloud Kafka cluster**
+- **Standard** cluster, public endpoint, **Azure germanywestcentral** (the same region as the USM Private Link).
+- Any cluster type works for Connect itself. Enterprise has no public endpoint, so it doesn't fit this variant. The USM docs list no cluster-type requirement, only that the cluster runs on **Azure or AWS**.
 
 **Accounts**
 - **Confluent Cloud:** `OrgAdmin`, plus an environment with the **Advanced** Stream Governance package.
 - **Azure:** a subscription where you can create AKS, private endpoints and private DNS zones (Contributor is enough).
+- **Outbound internet** from the AKS nodes. Connect needs it for Confluent Hub (plugin download) and for the public Kafka and Schema Registry endpoints. AKS allows outbound traffic by default.
 
 ---
 
-# Phase A: Confluent Platform on AKS
-
-Goal: a working, standalone CP cluster with traffic and **no USM yet**.
+# Phase A: AKS and Confluent for Kubernetes
 
 ## A1. Create the AKS cluster and namespace
 
@@ -78,7 +89,7 @@ Goal: a working, standalone CP cluster with traffic and **no USM yet**.
 2. **Basics:** resource group `rg-usm-lab`, cluster name `aks-usm-lab`, region **Germany West Central**. Keep the defaults for everything else.
 3. **Review + create** → **Create**. This takes about 5–10 minutes.
 4. Connect `kubectl`: on the cluster page, click **Connect** and run the `az aks get-credentials` command it shows.
-5. Create the namespace `confluent`. All CP and USM resources in this demo go there.
+5. Create the namespace `confluent`. All Connect and USM resources in this demo go there.
    ```bash
    kubectl create namespace confluent
    ```
@@ -106,60 +117,52 @@ helm upgrade --install confluent-operator confluentinc/confluent-for-kubernetes 
 
 ✅ **Check:** `kubectl -n confluent get pods` shows `confluent-operator-…` as `Running`.
 
-## A3. Deploy Confluent Platform
-
-| File | Resource |
-|---|---|
-| [`10-kraftcontroller.yaml`](k8s/cp/10-kraftcontroller.yaml) | 1 KRaft controller |
-| [`11-kafka.yaml`](k8s/cp/11-kafka.yaml) | 3 brokers |
-| [`12-schemaregistry.yaml`](k8s/cp/12-schemaregistry.yaml) | 1 Schema Registry (used by Datagen's Avro converter) |
-| [`13-connect.yaml`](k8s/cp/13-connect.yaml) | 1 Connect worker with the Datagen plugin |
-
-```bash
-kubectl apply -f k8s/cp/10-kraftcontroller.yaml
-kubectl apply -f k8s/cp/11-kafka.yaml
-kubectl apply -f k8s/cp/12-schemaregistry.yaml
-kubectl apply -f k8s/cp/13-connect.yaml
-
-kubectl -n confluent get pods -w      # wait until everything is Running/Ready (several minutes)
-```
-
-✅ **Check:** `kubectl -n confluent get pods` shows all `PHASE=RUNNING`.
-
-> ⚠️ If a pod stays `Pending`, run `kubectl describe pod <name>`. The cause is usually storage or capacity.
-
-## A4. Demo data with Datagen
-
-[`14-datagen-connector.yaml`](k8s/cp/14-datagen-connector.yaml) creates the topic `pageviews` and a Datagen connector that produces Avro records.
-
-Datagen produces **continuously**, about 2–5 records per second (a random pause of up to `max.interval: 500` ms between records), until you delete the connector. This steady traffic is what USM shows as throughput in Phase B. The `--max-messages 3` in the check below only limits how many records the consumer reads.
-
-```bash
-kubectl apply -f k8s/cp/14-datagen-connector.yaml
-```
-
-✅ **Check:**
-```bash
-kubectl -n confluent get kafkatopic,connector     # connector STATUS=CREATED, TASKS-READY 1/1
-kubectl -n confluent exec schemaregistry-0 -c schemaregistry -- env LOG_DIR=/tmp kafka-avro-console-consumer \
-  --bootstrap-server kafka.confluent.svc.cluster.local:9071 --topic pageviews \
-  --from-beginning --max-messages 3 --formatter-property schema.registry.url=http://localhost:8081
-```
-
 > [!NOTE]
-> ### Checkpoint A: Confluent Platform runs on AKS
-> - ✅ KRaft controller, 3 brokers, Schema Registry and Connect are running in namespace `confluent`
-> - ✅ Datagen writes Avro records to `pageviews`, with the schema in the local Schema Registry
+> ### Checkpoint A: AKS is ready
+> - ✅ AKS cluster `aks-usm-lab` with namespace `confluent`
+> - ✅ CFK operator is running
 >
-> **Next:** connect this cluster to Confluent Cloud with USM.
+> **Next:** prepare Confluent Cloud.
 
 ---
 
-# Phase B: Connect to Confluent Cloud with USM
+# Phase B: Confluent Cloud
+
+## B0. Create the Kafka cluster
+
+1. CC UI → **Environments** → your environment (Advanced governance) → **Add cluster**.
+2. Type **Standard**, provider **Microsoft Azure**, region **Germany West Central (germanywestcentral)**, single zone is fine for the lab.
+3. Name it, e.g. `connect-lab`, and **Launch cluster**.
+4. Note three values:
+
+| Value | Where | Example |
+|---|---|---|
+| **Cluster ID** | Cluster → **Cluster settings** → **General** | `lkc-xxxxxx` |
+| **Bootstrap server** | Cluster → **Cluster settings** → **Endpoints** | `pkc-xxxxx.germanywestcentral.azure.confluent.cloud:9092` |
+| **Schema Registry endpoint** | Environment → **Schema Registry** (right side panel / *Stream Governance API*) | `https://psrc-xxxxx.germanywestcentral.azure.confluent.cloud` |
+
+```bash
+export CC_ENV_ID="env-xxxxxx"
+export CC_KAFKA_ID="lkc-xxxxxx"
+export CC_BOOTSTRAP="pkc-xxxxx.germanywestcentral.azure.confluent.cloud:9092"
+export CC_SR_URL="https://psrc-xxxxx.germanywestcentral.azure.confluent.cloud"
+```
+
+> ⚠️ Use the **public** Schema Registry endpoint, not the private one. Connect talks to Schema Registry over the internet in this scenario.
+
+<details><summary>CLI alternative</summary>
+
+```bash
+confluent kafka cluster create connect-lab \
+  --cloud azure --region germanywestcentral --type standard --environment "$CC_ENV_ID"
+confluent kafka cluster describe "$CC_KAFKA_ID" --environment "$CC_ENV_ID"     # Endpoint = SASL_SSL://<bootstrap>
+confluent schema-registry cluster describe --environment "$CC_ENV_ID"           # Endpoint URL, Cluster ID (lsrc-…)
+```
+</details>
 
 ## B1. USM setup wizard and Private Link
 
-The wizard sets up private networking, creates the agent's service account and API key, and generates the **agent configuration file**. You switch to the Azure Portal twice: once for the Private Endpoint, once for DNS.
+The wizard sets up private networking, creates the agent's service account and API key, and generates the **agent configuration file**. You switch to the Azure Portal twice: once for the Private Endpoint, once for DNS. This Private Link is **only for the USM Agent**. Connect's Kafka traffic doesn't use it.
 
 > [!NOTE]
 > ### How the private connection works
@@ -181,9 +184,11 @@ The wizard sets up private networking, creates the agent's service account and A
 > If one piece is missing, point 3 returns a public address or none at all, and the agent fails with `503`.
 
 **1. Start the wizard**
-CC UI → **Environments** → your environment → **Clusters** → **Register platform cluster**.
+CC UI → **Environments** → your environment → **Clusters** → `connect-lab` → **Connectors** → **Self-managed** → **Register Connect cluster** → **New agent** → **Get started**.
 
-![Wizard – start](images/b1-wizard-start.png) 
+<!-- TODO screenshot: wizard start from Connectors → Self-managed -->
+
+> ℹ️ The wizard ends by asking for the Connect cluster ID. Connect doesn't exist yet. Finish networking, service account and config file here, deploy in Phase C, and come back in [D1](#d1-register-the-connect-cluster) with **Existing agent**.
 
 **2. Network: create the gateway**
 **Add network configuration** → **Microsoft Azure**, region **germanywestcentral** → submit. Copy the **Private Link Service alias/ID** it shows.
@@ -238,6 +243,8 @@ Then **Private DNS zones** → **Create** and go through the tabs:
 > - **Zone name:** must match exactly. Only names ending in the zone name are answered from your zone. Compare it with the alias from point 2 in the box above: `api.`**`apd70o3n.germanywestcentral.azure.accesspoint.confluent.cloud`**.
 > - **Record `* 60 IN A <ip>`:** every name in the zone (`*`) points to your endpoint IP (`A` = IPv4 address). `60` means the answer is cached for 60 seconds.
 > - **VNet link:** decides who can see the zone. Without it, AKS pods never get the private answer.
+>
+> The zone only covers `…accesspoint.confluent.cloud` names. The public Kafka (`pkc-…`) and Schema Registry (`psrc-…`) hostnames still resolve to public addresses.
 
 **6. Service account**
 Create a new service account, e.g. `sa-usm-agent-lab`. The wizard creates its API keys and assigns two role bindings on **your environment**:
@@ -266,7 +273,7 @@ Click **Generate configuration file** and download the JSON.
 
 ```bash
 export AGENT_JSON="$HOME/Downloads/usm-agent-config.json"
-jq '{ENVIRONMENT_ID, FRONTDOOR_URL}' "$AGENT_JSON"     # you need these two values in B3
+jq '{ENVIRONMENT_ID, FRONTDOOR_URL}' "$AGENT_JSON"     # you need these two values in C2
 ```
 
 > ⚠️ The JSON contains secrets. Don't commit it, and delete it after the demo.
@@ -315,129 +322,229 @@ az network private-dns link vnet create -g rg-usm-lab -z "$PDNS_ZONE" -n aks-vne
 ```
 </details>
 
-## B2. Kubernetes secret
+## B2. Create the topic
 
-The agent reads its Confluent Cloud API key from a Secret with key `basic.txt`.
+Cluster `connect-lab` → **Topics** → **Create topic**: name `pageviews`, **3** partitions → **Create with defaults**. Skip the data contract dialog; the Avro converter registers the schema in C4.
+
+✅ **Check:** `pageviews` appears in the topic list.
+
+<details><summary>CLI alternative</summary>
+
+```bash
+confluent kafka topic create pageviews --partitions 3 --cluster "$CC_KAFKA_ID" --environment "$CC_ENV_ID"
+```
+</details>
+
+## B3. Service account for Connect
+
+Connect needs its own credentials for Kafka and Schema Registry. Don't reuse the USM Agent's key: that one only has `USMAgent` and `DataSteward`.
+
+1. CC UI → **Administration** → **Accounts & access** → **Service accounts** → **Add service account**: name `sa-connect-lab`.
+2. Role bindings for `sa-connect-lab`:
+
+| Role | Scope | Why |
+|---|---|---|
+| **CloudClusterAdmin** | Cluster `connect-lab` | Lab shortcut: internal topics, consumer group, writing to `pageviews` |
+| **ResourceOwner** | Schema Registry, subject `*` | Register and read schemas (`pageviews-value`) |
+
+3. API keys owned by `sa-connect-lab`:
+   - **Kafka API key:** cluster `connect-lab` → **API keys** → **Add key** → **Service account** → `sa-connect-lab`.
+   - **Schema Registry API key:** environment → **Schema Registry** → **API keys** → **Add key** → **Service account** → `sa-connect-lab`.
+
+```bash
+export CC_KAFKA_KEY="..."    CC_KAFKA_SECRET="..."
+export CC_SR_KEY="..."       CC_SR_SECRET="..."
+```
+
+> ⚠️ `CloudClusterAdmin` is too broad for production. Use `DeveloperRead`/`DeveloperWrite` on the topics and on the Connect consumer group, plus `DeveloperManage` on the internal topic prefix.
+
+<details><summary>CLI alternative</summary>
+
+```bash
+confluent iam service-account create sa-connect-lab --description "Self-managed Connect on AKS"
+export CONNECT_SA="sa-xxxxxx"
+export CC_SR_ID="lsrc-xxxxxx"     # from: confluent schema-registry cluster describe
+
+confluent iam rbac role-binding create --principal User:$CONNECT_SA --role CloudClusterAdmin \
+  --environment "$CC_ENV_ID" --cloud-cluster "$CC_KAFKA_ID"
+# Flag names for Schema Registry scope vary between CLI versions; check --help
+confluent iam rbac role-binding create --principal User:$CONNECT_SA --role ResourceOwner \
+  --environment "$CC_ENV_ID" --schema-registry-cluster "$CC_SR_ID" --resource "Subject:*"
+
+confluent api-key create --resource "$CC_KAFKA_ID" --service-account "$CONNECT_SA"
+confluent api-key create --resource "$CC_SR_ID"    --service-account "$CONNECT_SA"
+```
+</details>
+
+> [!NOTE]
+> ### Checkpoint B: Confluent Cloud is ready
+> - ✅ Standard cluster `connect-lab` with topic `pageviews`
+> - ✅ USM Private Link (gateway, Private Endpoint, access point, DNS) and the agent config JSON
+> - ✅ Service account `sa-connect-lab` with Kafka and Schema Registry API keys
+>
+> **Next:** deploy the agent and Connect on AKS.
+
+---
+
+# Phase C: Deploy on AKS
+
+## C1. Kubernetes secrets
+
+Three secrets. Each CFK secret uses a fixed key name.
+
+| Secret | Key | Used by | Content |
+|---|---|---|---|
+| `usm-ccloud-cred` | `basic.txt` | USM Agent | API key of `sa-usm-agent-lab` (from the agent JSON) |
+| `ccloud-kafka-cred` | `plain.txt` | Connect → Kafka | Kafka API key of `sa-connect-lab` |
+| `ccloud-sr-cred` | `basic.txt` | Connect → Schema Registry | Schema Registry API key of `sa-connect-lab` |
 
 ```bash
 kubectl -n confluent create secret generic usm-ccloud-cred \
   --from-file=basic.txt=<(printf 'username=%s\npassword=%s\n' \
      "$(jq -r .SERVICE_ACCOUNT_API_KEY "$AGENT_JSON")" "$(jq -r .SERVICE_ACCOUNT_API_SECRET "$AGENT_JSON")")
+
+kubectl -n confluent create secret generic ccloud-kafka-cred \
+  --from-file=plain.txt=<(printf 'username=%s\npassword=%s\n' "$CC_KAFKA_KEY" "$CC_KAFKA_SECRET")
+
+kubectl -n confluent create secret generic ccloud-sr-cred \
+  --from-file=basic.txt=<(printf 'username=%s\npassword=%s\n' "$CC_SR_KEY" "$CC_SR_SECRET")
 ```
 
-✅ **Check:** `kubectl -n confluent get secret usm-ccloud-cred` exists.
+✅ **Check:** `kubectl -n confluent get secret usm-ccloud-cred ccloud-kafka-cred ccloud-sr-cred` lists all three.
 
-## B3. Deploy the USM Agent
+## C2. Deploy the USM Agent
 
-[`20-usmagent.yaml`](k8s/usm/20-usmagent.yaml) deploys one agent pod. CP reaches it in-cluster at `usm-agent.confluent.svc.cluster.local:10000`.
+[`10-usmagent.yaml`](k8s/connect-cc/10-usmagent.yaml) deploys one agent pod. Connect reaches it in-cluster at `usm-agent.confluent.svc.cluster.local:10000`. The two values from the agent JSON (B1 step 7) are filled in with `envsubst`:
 
-1. Open `k8s/usm/20-usmagent.yaml` and replace the two placeholders with the values from the config file (B1 step 7):
-   ```yaml
-   confluentCloudClient:
-     endpoint: <FRONTDOOR_URL>         # e.g. https://api-apd70o3n.germanywestcentral.azure.accesspoint.glb.confluent.cloud:443
-     environmentId: <ENVIRONMENT_ID>   # e.g. env-xxxxxx
-   ```
-2. Deploy the agent:
-   ```bash
-   kubectl apply -f k8s/usm/20-usmagent.yaml
-   kubectl -n confluent get pods -l app=usm-agent      # wait for Running
-   ```
+```bash
+export CC_FRONTDOOR_URL="$(jq -r .FRONTDOOR_URL "$AGENT_JSON")"
+export CC_ENV_ID="$(jq -r .ENVIRONMENT_ID "$AGENT_JSON")"
+
+envsubst '$CC_FRONTDOOR_URL $CC_ENV_ID' < k8s/connect-cc/10-usmagent.yaml | kubectl apply -f -
+kubectl -n confluent get pods -l app=usm-agent      # wait for Running
+```
 
 ✅ **Check:** the agent pod shows `Running`.
 
-## B4. Register the Kafka cluster
+## C3. Deploy Connect
 
-Registering tells Confluent Cloud which CP cluster belongs to your environment. Get the Kafka cluster ID:
-```bash
-kubectl -n confluent get kafka kafka -o jsonpath='{.status.clusterID}'; echo
-```
-
-In the wizard, enter the **Kafka cluster ID** and a name (e.g. `pneff-aks`) → **Register cluster**.
-
-![Wizard – register cluster](images/b4-register.png)
-
-<details><summary>CLI alternative</summary>
-
-```bash
-confluent usm kafka register "$(kubectl -n confluent get kafka kafka -o jsonpath='{.status.clusterID}')" \
-  --name pneff-aks --cloud azure --region germanywestcentral --environment <env-id>
-```
-</details>
-
-✅ **Check:** CC UI → environment → **Clusters** → **Confluent Platform** tab shows `pneff-aks` with **Metrics delayed**. That's expected: CP doesn't send anything to the agent yet. The next step fixes that.
-
-## B5. Connect Kafka to the USM Agent
-
-The KRaft controller and the brokers get a `usmAgentClient` dependency, and CFK does a rolling restart. The controller sends metadata (topics, configs), and the brokers send metrics. The brokers also disable the legacy metrics reporter. Compare with `diff k8s/cp/11-kafka.yaml k8s/usm/22-kafka-usm.yaml`.
+[`11-connect.yaml`](k8s/connect-cc/11-connect.yaml) is the Connect worker from `main` (`k8s/cp/13-connect.yaml`) with three changes, marked `--- CC ---` / `--- USM ---` in the file:
 
 ```diff
    dependencies:
+     kafka:
+-      bootstrapEndpoint: kafka.confluent.svc.cluster.local:9071
++      bootstrapEndpoint: ${CC_BOOTSTRAP}            # Confluent Cloud, SASL_SSL
++      authentication: { type: plain, jaasConfig: { secretRef: ccloud-kafka-cred } }
++      tls: { enabled: true, ignoreTrustStoreConfig: true }
+     schemaRegistry:
+-      url: http://schemaregistry.confluent.svc.cluster.local:8081
++      url: ${CC_SR_URL}                             # Confluent Cloud Schema Registry
++      authentication: { type: basic, basic: { secretRef: ccloud-sr-cred } }
 +    usmAgentClient:
 +      url: http://usm-agent.confluent.svc.cluster.local:10000
 ```
 
-Apply in order and wait for each roll to finish:
+The file also sets replication factor 3 for the internal topics and mounts `ccloud-sr-cred` for the connector (C4).
 
 ```bash
-kubectl apply -f k8s/usm/21-kraftcontroller-usm.yaml   # metadata events
-kubectl -n confluent get pods -w
-kubectl apply -f k8s/usm/22-kafka-usm.yaml             # metrics
-kubectl -n confluent get pods -w
+envsubst '$CC_BOOTSTRAP $CC_SR_URL' < k8s/connect-cc/11-connect.yaml | kubectl apply -f -
+kubectl -n confluent get pods -w      # wait until connect-0 is Running/Ready (plugin download takes a few minutes)
 ```
 
-✅ **Check:** after a few minutes, **Metrics delayed** disappears. Cluster `pneff-aks` shows the topic `pageviews` and its throughput.
+✅ **Check:**
+- `kubectl -n confluent get connect` shows `PHASE=RUNNING`.
+- CC UI → `connect-lab` → **Topics**: Connect created its three internal topics (names ending in `-configs`, `-offsets`, `-status`).
 
-![USM – cluster overview](images/b5-cluster-overview.png)
+> ⚠️ If `connect-0` restarts with authentication or timeout errors, check `kubectl -n confluent logs connect-0`. The usual causes are a wrong bootstrap server, a Schema Registry key used for Kafka (or the other way round), or a missing role binding.
+
+## C4. Demo data with Datagen
+
+[`12-datagen-connector.yaml`](k8s/connect-cc/12-datagen-connector.yaml) creates the Datagen connector. It produces Avro records into the Confluent Cloud topic `pageviews`, and the Avro converter registers `pageviews-value` in Confluent Cloud Schema Registry. Only `$CC_SR_URL` is substituted. The `${file:…}` references stay in the manifest, and the worker resolves them from the mounted secret.
+
+Datagen produces **continuously**, about 2–5 records per second (a random pause of up to `max.interval: 500` ms between records), until you delete the connector. This steady traffic is what USM shows as throughput in Phase D.
+
+```bash
+envsubst '$CC_SR_URL' < k8s/connect-cc/12-datagen-connector.yaml | kubectl apply -f -
+```
+
+✅ **Check:**
+- `kubectl -n confluent get connector` shows `STATUS=CREATED`, `TASKS-READY 1/1`.
+- CC UI → `connect-lab` → **Topics** → `pageviews` → **Messages** shows new records.
+- CC UI → environment → **Schema Registry** → **Subjects** lists `pageviews-value`.
+
+<details><summary>CLI alternative (check)</summary>
+
+```bash
+confluent kafka topic consume pageviews --value-format avro --from-beginning \
+  --cluster "$CC_KAFKA_ID" --environment "$CC_ENV_ID"
+```
+</details>
 
 > [!NOTE]
-> ### Checkpoint B: CP is monitored in Confluent Cloud
-> - ✅ The USM Agent connects to Confluent Cloud over Azure Private Link
-> - ✅ Cluster `pneff-aks` and the topic `pageviews` with live throughput are visible in the Cloud Console
-> - ✅ Message payloads never leave your AKS cluster
+> ### Checkpoint C: Connect writes into Confluent Cloud
+> - ✅ USM Agent and Connect are running in namespace `confluent`
+> - ✅ Datagen writes Avro records to `pageviews` in Confluent Cloud, with the schema in Confluent Cloud Schema Registry
+>
+> **Next:** make the Connect cluster visible in USM.
 
-## B6. Optional: add the Connect cluster
+---
 
-Connect sends connector metadata and metrics through the same agent.
+# Phase D: Register Connect with USM
 
-1. Point Connect at the agent (rolling restart):
-   ```bash
-   kubectl apply -f k8s/usm/23-connect-usm.yaml
-   kubectl -n confluent get pods -w
-   ```
-2. Get the Connect group ID:
+## D1. Register the Connect cluster
+
+Registering maps the self-managed Connect cluster to the Cloud Kafka cluster `connect-lab`, its **metadata cluster**. Workers already send data to the agent (C3), and registering makes it visible.
+
+1. Get the Connect cluster ID (the Connect group ID):
    ```bash
    kubectl -n confluent get connect connect -o jsonpath='{.status.groupID}'; echo
    ```
-3. In the Cloud Console, register the Connect cluster with this **group ID** and attach it to `pneff-aks`.
+2. CC UI → `connect-lab` → **Connectors** → **Self-managed** → **Register Connect cluster** → **Existing agent** → **Get started**.
+3. Select the network configuration from B1, enter the group ID → **Submit**.
+
+<!-- TODO screenshot: register Connect cluster -->
 
 <details><summary>CLI alternative</summary>
 
 ```bash
 confluent usm connect register "$(kubectl -n confluent get connect connect -o jsonpath='{.status.groupID}')" \
-  --confluent-platform-kafka-cluster "$(kubectl -n confluent get kafka kafka -o jsonpath='{.status.clusterID}')" \
-  --cloud azure --region germanywestcentral --environment <env-id>
+  --kafka-cluster-id "$CC_KAFKA_ID" --cloud azure --region germanywestcentral --environment "$CC_ENV_ID"
 ```
 </details>
 
-✅ **Check:** the connector `datagen-pageviews` shows up in the Cloud Console.
-![USM – connector](images/b6-connector.png) <!-- TODO screenshot -->
+✅ **Check:** after a few minutes, `connect-lab` → **Connectors** → **Self-managed** lists `datagen-pageviews` with status, tasks, throughput and lag.
+
+<!-- TODO screenshot: self-managed connector in USM -->
+
+> ⚠️ If the connector doesn't show up, check the agent logs (`kubectl -n confluent logs -l app=usm-agent`). A `503` means the Private Link/DNS chain from B1 is broken. Repeat the `nslookup` check.
+
+> [!NOTE]
+> ### Checkpoint D: self-managed Connect is monitored in Confluent Cloud
+> - ✅ Connect on AKS uses Confluent Cloud Kafka and Schema Registry
+> - ✅ The USM Agent connects to Confluent Cloud over Azure Private Link
+> - ✅ The connector `datagen-pageviews` is visible under **Self-managed** in the Cloud Console
 
 ---
 
 ## Cleanup
 
-1. Cloud Console: deregister the Connect cluster (if you did B6) and then the Kafka cluster (environment → **Clusters** → **Confluent Platform**).
-2. Cloud Console: delete the access point and then the gateway (environment → **Network management**).
-3. Azure Portal: delete resource group `rg-usm-lab`. This removes AKS (and its `MC_` group), the Private Endpoint and the DNS zone. If the `MC_` group won't delete, delete the Private Endpoint first.
-4. Cloud Console: delete the service account `sa-usm-agent-lab` and its API key. Delete the downloaded JSON.
+1. Delete the connector so Datagen stops producing: `kubectl -n confluent delete connector datagen-pageviews`.
+2. Cloud Console: deregister the Connect cluster (`connect-lab` → **Connectors** → **Self-managed**).
+3. Cloud Console: delete the access point and then the gateway (environment → **Network management**).
+4. Cloud Console: delete the cluster `connect-lab`. This removes `pageviews` and the Connect internal topics. Delete the subject `pageviews-value` in Schema Registry.
+5. Azure Portal: delete resource group `rg-usm-lab`. This removes AKS (and its `MC_` group), the Private Endpoint and the DNS zone. If the `MC_` group won't delete, delete the Private Endpoint first.
+6. Cloud Console: delete the service accounts `sa-usm-agent-lab` and `sa-connect-lab` with their API keys. Delete the downloaded JSON.
 
 <details><summary>CLI alternative</summary>
 
 ```bash
-confluent usm connect deregister <usmcc-id> --environment "$CC_ENV_ID"   # only if you did B6
-confluent usm kafka deregister <usmkc-id> --environment "$CC_ENV_ID"
+kubectl -n confluent delete connector datagen-pageviews
+confluent usm connect deregister <usmcc-id> --environment "$CC_ENV_ID"
 confluent network access-point private-link ingress-endpoint delete <ap-id> --environment "$CC_ENV_ID"
 confluent network gateway delete <gw-id> --environment "$CC_ENV_ID"
+confluent kafka cluster delete "$CC_KAFKA_ID" --environment "$CC_ENV_ID"
+confluent schema-registry subject delete --subject pageviews-value --environment "$CC_ENV_ID"   # check --help
 az group delete --name rg-usm-lab --yes --no-wait
 ```
 </details>
