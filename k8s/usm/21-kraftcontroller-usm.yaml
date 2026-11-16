@@ -1,0 +1,19 @@
+# Phase B: KRaft controller with USM. Identical to k8s/cp/10-kraftcontroller.yaml
+# plus the block marked "--- USM ---".
+apiVersion: platform.confluent.io/v1beta1
+kind: KRaftController
+metadata:
+  name: kraftcontroller
+  namespace: confluent
+spec:
+  replicas: 1
+  image:
+    application: confluentinc/cp-server:8.2.4
+    init: confluentinc/confluent-init-container:3.3.1
+  dataVolumeCapacity: 10Gi
+  storageClass:
+    name: managed-csi   # AKS default CSI disk class (the upstream example uses AWS gp2)
+  # --- USM --- controllers send metadata events (topics, configs) to the agent
+  dependencies:
+    usmAgentClient:
+      url: http://usm-agent.confluent.svc.cluster.local:10000

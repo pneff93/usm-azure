@@ -1,0 +1,25 @@
+# Phase B: Kafka brokers with USM. Identical to k8s/cp/11-kafka.yaml plus the
+# blocks marked "--- USM ---".
+apiVersion: platform.confluent.io/v1beta1
+kind: Kafka
+metadata:
+  name: kafka
+  namespace: confluent
+spec:
+  replicas: 3
+  image:
+    application: confluentinc/cp-server:8.2.4
+    init: confluentinc/confluent-init-container:3.3.1
+  dataVolumeCapacity: 10Gi
+  storageClass:
+    name: managed-csi
+  # --- USM --- telemetry goes through the agent, not the legacy metrics reporter
+  metricReporter:
+    enabled: false
+  dependencies:
+    kRaftController:
+      clusterRef:
+        name: kraftcontroller
+    # --- USM --- brokers send metrics (throughput, lag, ...) to the agent
+    usmAgentClient:
+      url: http://usm-agent.confluent.svc.cluster.local:10000

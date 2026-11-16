@@ -1,0 +1,22 @@
+# Phase B: copy all existing on-prem schemas (e.g. pageviews-value) to Cloud SR.
+# Must be RUNNING before the SchemaImporter (30) triggers the switchover.
+# Apply with:  envsubst < k8s/usm/25-schemaexporter.yaml | kubectl apply -f -
+apiVersion: platform.confluent.io/v1beta1
+kind: SchemaExporter
+metadata:
+  name: schema-exporter
+  namespace: confluent
+spec:
+  sourceCluster:
+    schemaRegistryClusterRef:
+      name: schemaregistry
+      namespace: confluent
+  destinationCluster:
+    schemaRegistryRest:
+      endpoint: ${CC_SR_URL}
+      authentication:
+        type: basic
+        basic:
+          secretRef: cc-sr-credential
+  contextType: "NONE"    # keep subjects in the same context, no prefixing
+  subjects: [":*:"]      # all subjects in all contexts

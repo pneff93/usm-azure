@@ -1,0 +1,18 @@
+# Phase A: 3 Kafka brokers in KRaft mode, PLAINTEXT, no USM yet.
+apiVersion: platform.confluent.io/v1beta1
+kind: Kafka
+metadata:
+  name: kafka
+  namespace: confluent
+spec:
+  replicas: 3
+  image:
+    application: confluentinc/cp-server:8.2.4
+    init: confluentinc/confluent-init-container:3.3.1
+  dataVolumeCapacity: 10Gi
+  storageClass:
+    name: managed-csi
+  dependencies:
+    kRaftController:
+      clusterRef:
+        name: kraftcontroller
