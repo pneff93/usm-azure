@@ -419,7 +419,8 @@ confluent usm connect register "$(kubectl -n confluent get connect connect -o js
 </details>
 
 ✅ **Check:** the connector `datagen-pageviews` shows up in the CC UI.
-![USM – connector](images/b6-connector.png) <!-- TODO screenshot -->
+
+![USM – connector](images/b6-connector.png)
 
 ---
 
