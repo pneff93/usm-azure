@@ -49,9 +49,6 @@ A step-by-step demo for a **different scenario** than the `main` branch: there i
 
 ## Architecture
 
-![Architecture](images/architecture-connect-cc.png)
-<!-- TODO screenshot: architecture for the Connect-only scenario -->
-
 - **Two separate paths leave AKS.** Phase A builds only the data path; Phase B adds the USM path:
   - **Data path (public internet):** Connect produces to and consumes from the Confluent Cloud Kafka cluster (SASL_SSL, API key) and uses Confluent Cloud Schema Registry (HTTPS, API key). The Connect internal topics (configs, offsets, status) live in Confluent Cloud too.
   - **USM path (Azure Private Link):** Connect workers send connector metadata and metrics to the **USM Agent** in the same AKS cluster. The agent forwards them to Confluent Cloud over Private Link.
@@ -96,9 +93,9 @@ Create the cluster before you start. Connect needs it in Phase A, and USM uses i
 ```bash
 export CC_ENV_ID="env-xxxxxx"
 export CC_KAFKA_ID="lkc-xxxxxx"
-export CC_BOOTSTRAP="pkc-xxxxx.germanywestcentral.azure.confluent.cloud:9092"
-export CC_SR_URL="https://psrc-xxxxx.germanywestcentral.azure.confluent.cloud"
 ```
+
+You put the **bootstrap server** and the **Schema Registry endpoint** directly into the YAML files in A6 and A7.
 
 > ⚠️ Use the **public** Schema Registry endpoint, not the private one. Connect talks to Schema Registry over the internet in this scenario.
 
@@ -210,12 +207,13 @@ confluent api-key create --resource "$CC_SR_ID"    --service-account "$CONNECT_S
 
 ## A5. Kubernetes secrets for Connect
 
-Two secrets. Each CFK secret uses a fixed key name.
+Three secrets. Each CFK secret uses a fixed key name. The Schema Registry key goes into two secrets because CFK won't mount a secret (`spec.mountedSecrets`) that is already referenced under `spec.dependencies`.
 
 | Secret | Key | Used by | Content |
 |---|---|---|---|
 | `ccloud-kafka-cred` | `plain.txt` | Connect → Kafka | Kafka API key of `sa-connect-lab` |
-| `ccloud-sr-cred` | `basic.txt` | Connect → Schema Registry | Schema Registry API key of `sa-connect-lab` |
+| `ccloud-sr-cred` | `basic.txt` | Connect worker → Schema Registry | Schema Registry API key of `sa-connect-lab` |
+| `ccloud-sr-connector-cred` | `basic.txt` | Datagen's Avro converter → Schema Registry (mounted as a file) | The same Schema Registry API key |
 
 ```bash
 kubectl -n confluent create secret generic ccloud-kafka-cred \
@@ -223,9 +221,12 @@ kubectl -n confluent create secret generic ccloud-kafka-cred \
 
 kubectl -n confluent create secret generic ccloud-sr-cred \
   --from-file=basic.txt=<(printf 'username=%s\npassword=%s\n' "$CC_SR_KEY" "$CC_SR_SECRET")
+
+kubectl -n confluent create secret generic ccloud-sr-connector-cred \
+  --from-file=basic.txt=<(printf 'username=%s\npassword=%s\n' "$CC_SR_KEY" "$CC_SR_SECRET")
 ```
 
-✅ **Check:** `kubectl -n confluent get secret ccloud-kafka-cred ccloud-sr-cred` lists both.
+✅ **Check:** `kubectl -n confluent get secret ccloud-kafka-cred ccloud-sr-cred ccloud-sr-connector-cred` lists all three.
 
 ## A6. Deploy Connect
 
@@ -235,19 +236,24 @@ kubectl -n confluent create secret generic ccloud-sr-cred \
    dependencies:
      kafka:
 -      bootstrapEndpoint: kafka.confluent.svc.cluster.local:9071
-+      bootstrapEndpoint: ${CC_BOOTSTRAP}            # Confluent Cloud, SASL_SSL
++      bootstrapEndpoint: pkc-xxxxx.germanywestcentral.azure.confluent.cloud:9092   # Confluent Cloud, SASL_SSL
 +      authentication: { type: plain, jaasConfig: { secretRef: ccloud-kafka-cred } }
 +      tls: { enabled: true, ignoreTrustStoreConfig: true }
      schemaRegistry:
 -      url: http://schemaregistry.confluent.svc.cluster.local:8081
-+      url: ${CC_SR_URL}                             # Confluent Cloud Schema Registry
++      url: https://psrc-xxxxx.germanywestcentral.azure.confluent.cloud             # Confluent Cloud Schema Registry
 +      authentication: { type: basic, basic: { secretRef: ccloud-sr-cred } }
 ```
 
-The file also sets replication factor 3 for the internal topics and mounts `ccloud-sr-cred` for the connector (A7).
+The file also sets replication factor 3 for the internal topics and mounts `ccloud-sr-connector-cred` for the connector (A7).
+
+1. Open `10-connect.yaml` and replace the two endpoints with your values from the [prerequisites](#confluent-cloud-kafka-cluster):
+   - `spec.dependencies.kafka.bootstrapEndpoint`: the bootstrap server
+   - `spec.dependencies.schemaRegistry.url`: the Schema Registry endpoint
+2. Apply it:
 
 ```bash
-envsubst '$CC_BOOTSTRAP $CC_SR_URL' < k8s/connect-cc/10-connect.yaml | kubectl apply -f -
+kubectl apply -f k8s/connect-cc/10-connect.yaml
 kubectl -n confluent get pods -w      # wait until connect-0 is Running/Ready (plugin download takes a few minutes)
 ```
 
@@ -259,12 +265,12 @@ kubectl -n confluent get pods -w      # wait until connect-0 is Running/Ready (p
 
 ## A7. Demo data with Datagen
 
-[`11-datagen-connector.yaml`](k8s/connect-cc/11-datagen-connector.yaml) creates the Datagen connector. It produces Avro records into the Confluent Cloud topic `pageviews`, and the Avro converter registers `pageviews-value` in Confluent Cloud Schema Registry. Only `$CC_SR_URL` is substituted. The `${file:…}` references stay in the manifest, and the worker resolves them from the mounted secret.
+[`11-datagen-connector.yaml`](k8s/connect-cc/11-datagen-connector.yaml) creates the Datagen connector. It produces Avro records into the Confluent Cloud topic `pageviews`, and the Avro converter registers `pageviews-value` in Confluent Cloud Schema Registry. Before applying, replace `value.converter.schema.registry.url` with your Schema Registry endpoint (the same as in `10-connect.yaml`). The `${file:…}` references stay as they are, and the worker resolves them from the mounted secret.
 
 Datagen produces **continuously**, about 2–5 records per second (a random pause of up to `max.interval: 500` ms between records), until you delete the connector. This steady traffic is what USM shows as throughput in Phase B.
 
 ```bash
-envsubst '$CC_SR_URL' < k8s/connect-cc/11-datagen-connector.yaml | kubectl apply -f -
+kubectl apply -f k8s/connect-cc/11-datagen-connector.yaml
 ```
 
 ✅ **Check:**
@@ -511,22 +517,22 @@ confluent usm connect register "$(kubectl -n confluent get connect connect -o js
 
 ```diff
      schemaRegistry:
-       url: ${CC_SR_URL}
+       url: https://psrc-xxxxx.germanywestcentral.azure.confluent.cloud
        authentication: { type: basic, basic: { secretRef: ccloud-sr-cred } }
 +    usmAgentClient:
 +      url: http://usm-agent.confluent.svc.cluster.local:10000
 ```
 
-Applying it triggers a rolling restart of the workers. The connector resumes from its stored offsets.
+Use the same bootstrap server and Schema Registry endpoint as in `10-connect.yaml`. Applying it triggers a rolling restart of the workers. The connector resumes from its stored offsets.
 
 ```bash
-envsubst '$CC_BOOTSTRAP $CC_SR_URL' < k8s/connect-cc/21-connect-usm.yaml | kubectl apply -f -
+kubectl apply -f k8s/connect-cc/21-connect-usm.yaml
 kubectl -n confluent get pods -w      # wait until connect-0 is Running/Ready again
 ```
 
 ✅ **Check:** after a few minutes, `connect-lab` → **Connectors** → **Self-managed** lists `datagen-pageviews` with status, tasks, throughput and lag.
 
-<!-- TODO screenshot: self-managed connector in USM -->
+![](images/b5-connect-overview.png)
 
 > ⚠️ If the connector doesn't show up, check the agent logs (`kubectl -n confluent logs -l app=usm-agent`):
 > - `503`: the Private Link/DNS chain from B1 is broken. Repeat the `nslookup` check.
