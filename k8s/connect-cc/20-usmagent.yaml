@@ -1,6 +1,6 @@
 # USM Agent. Single outbound path from the self-managed Connect cluster to
 # Confluent Cloud (USM control plane), over Azure Private Link.
-# Apply with:  envsubst '$CC_FRONTDOOR_URL $CC_ENV_ID' < k8s/connect-cc/10-usmagent.yaml | kubectl apply -f -
+# Apply with:  envsubst '$CC_FRONTDOOR_URL $CC_ENV_ID' < k8s/connect-cc/20-usmagent.yaml | kubectl apply -f -
 #   ${CC_FRONTDOOR_URL} -> "FRONTDOOR_URL" from the agent config JSON
 #   ${CC_ENV_ID}        -> "ENVIRONMENT_ID" from the agent config JSON
 # No externalAccess: Connect runs in the same AKS cluster and reaches the agent via

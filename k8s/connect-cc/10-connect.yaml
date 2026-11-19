@@ -1,0 +1,56 @@
+# Self-managed Kafka Connect on AKS, bootstrapping against a Confluent Cloud
+# Kafka cluster (public endpoint) and Confluent Cloud Schema Registry.
+# Datagen plugin is installed from Confluent Hub at pod start (needs outbound
+# internet from the AKS nodes).
+# Apply with:  envsubst '$CC_BOOTSTRAP $CC_SR_URL' < k8s/connect-cc/10-connect.yaml | kubectl apply -f -
+#   ${CC_BOOTSTRAP} -> bootstrap server of the CC cluster, e.g. pkc-xxxxx.germanywestcentral.azure.confluent.cloud:9092
+#   ${CC_SR_URL}    -> CC Schema Registry endpoint, e.g. https://psrc-xxxxx.germanywestcentral.azure.confluent.cloud
+# Phase A: no USM yet. Phase B applies 21-connect-usm.yaml, which is identical
+# plus the usmAgentClient block.
+apiVersion: platform.confluent.io/v1beta1
+kind: Connect
+metadata:
+  name: connect
+  namespace: confluent
+spec:
+  replicas: 1
+  image:
+    application: confluentinc/cp-server-connect:8.2.4
+    init: confluentinc/confluent-init-container:3.3.1
+  build:
+    type: onDemand
+    onDemand:
+      plugins:
+        locationType: confluentHub
+        confluentHub:
+          - name: kafka-connect-datagen
+            owner: confluentinc
+            version: 0.7.2
+  # --- CC --- mounted at /mnt/secrets/ccloud-sr-cred, used by the connector's
+  # Avro converter via ${file:...} (see 11-datagen-connector.yaml)
+  mountedSecrets:
+    - secretRef: ccloud-sr-cred
+  # --- CC --- Confluent Cloud requires replication factor 3 for the internal topics
+  configOverrides:
+    server:
+      - config.storage.replication.factor=3
+      - offset.storage.replication.factor=3
+      - status.storage.replication.factor=3
+  dependencies:
+    # --- CC --- Kafka in Confluent Cloud: SASL_SSL with an API key
+    kafka:
+      bootstrapEndpoint: ${CC_BOOTSTRAP}
+      authentication:
+        type: plain
+        jaasConfig:
+          secretRef: ccloud-kafka-cred     # key plain.txt: username=<api-key> / password=<api-secret>
+      tls:
+        enabled: true
+        ignoreTrustStoreConfig: true       # CC certificates are signed by public CAs
+    # --- CC --- Schema Registry in Confluent Cloud
+    schemaRegistry:
+      url: ${CC_SR_URL}
+      authentication:
+        type: basic
+        basic:
+          secretRef: ccloud-sr-cred        # key basic.txt: username=<api-key> / password=<api-secret>
