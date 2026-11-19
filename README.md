@@ -14,7 +14,6 @@ Each folder is self-contained: its own README, manifests (`k8s/`) and screenshot
 ## Shared building blocks
 
 Both scenarios use the same:
-- AKS cluster `aks-usm-lab` in resource group `rg-usm-lab`, **Germany West Central**, namespace `confluent`
 - CFK **3.3.1** (Helm chart `0.1718.99`), CP **8.2.4**, USM Agent **1.2.1**
 - USM Private Link setup: Ingress PrivateLink Gateway, Access Point, Private Endpoint in the AKS VNet, Private DNS zone
 

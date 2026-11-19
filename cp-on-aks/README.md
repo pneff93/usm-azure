@@ -6,7 +6,7 @@ A step-by-step demo in two phases:
 - **Phase B:** connect that cluster to Confluent Cloud with **Unified Stream Manager**, over **Azure Private Link**.
 
 **How the steps work**
-- Azure and Confluent Cloud steps use the **Portal / Cloud Console**. The CLI version is in a collapsed *CLI alternative* note.
+- Azure and Confluent Cloud steps use the **Portal / CC UI**. The CLI version is in a collapsed *CLI alternative* note.
 - Kubernetes steps use `kubectl` and `helm`. Run them from this folder (`cp-on-aks/`); the manifest paths are relative to it.
 
 ---
@@ -45,7 +45,6 @@ A step-by-step demo in two phases:
 ## Architecture
 
 ![Architecture](images/architecture.png)
-<!-- TODO screenshot: architecture from the demo -->
 
 - **Confluent Cloud is the control plane** (monitoring, catalog). Your CP cluster stays the **data plane**, so **message payloads never leave it**. Only metadata, configs and metrics are sent.
 - The **USM Agent** (Envoy-based) is the **single outbound path** from CP to Confluent Cloud. KRaft controllers send metadata events, brokers send metrics, Connect sends connector metadata. Confluent Cloud can't send commands back into your cluster.
@@ -209,7 +208,7 @@ The endpoint you just created is only a **connection request** to Confluent. Its
 
 1. Back in the wizard, paste the endpoint's **Resource ID** and create the access point.
 2. Wait until the access point shows **Ready** (a few minutes).
-3. Note the **access point ID**. It starts with `ap-` (e.g. `ap-d70o3n`), and you need it for the DNS zone name in step 5. Find it in the Cloud Console: your Private Link → **Access points** → **ID** column.
+3. Note the **access point ID**. It starts with `ap-` (e.g. `ap-d70o3n`), and you need it for the DNS zone name in step 5. Find it in the CC UI: your Private Link → **Access points** → **ID** column.
 4. In Azure, the endpoint → **Overview** → connection status now shows **Approved**.
 
 > ℹ️ **Two different IDs.** The **Resource ID** comes from Azure (`/subscriptions/…/privateEndpoints/<name>`). You paste it into the wizard. The **access point ID** comes from Confluent Cloud (`ap-…`). It goes into the DNS zone name in step 5, **without the hyphen**.
@@ -392,7 +391,7 @@ kubectl -n confluent get pods -w
 > [!NOTE]
 > ### Checkpoint B: CP is monitored in Confluent Cloud
 > - ✅ The USM Agent connects to Confluent Cloud over Azure Private Link
-> - ✅ Cluster `pneff-aks` and the topic `pageviews` with live throughput are visible in the Cloud Console
+> - ✅ Cluster `pneff-aks` and the topic `pageviews` with live throughput are visible in the CC UI
 > - ✅ Message payloads never leave your AKS cluster
 
 ## B6. Optional: add the Connect cluster
@@ -408,7 +407,7 @@ Connect sends connector metadata and metrics through the same agent.
    ```bash
    kubectl -n confluent get connect connect -o jsonpath='{.status.groupID}'; echo
    ```
-3. In the Cloud Console, register the Connect cluster with this **group ID** and attach it to `pneff-aks`.
+3. In the CC UI, register the Connect cluster with this **group ID** and attach it to `pneff-aks`.
 
 <details><summary>CLI alternative</summary>
 
@@ -419,17 +418,17 @@ confluent usm connect register "$(kubectl -n confluent get connect connect -o js
 ```
 </details>
 
-✅ **Check:** the connector `datagen-pageviews` shows up in the Cloud Console.
+✅ **Check:** the connector `datagen-pageviews` shows up in the CC UI.
 ![USM – connector](images/b6-connector.png) <!-- TODO screenshot -->
 
 ---
 
 ## Cleanup
 
-1. Cloud Console: deregister the Connect cluster (if you did B6) and then the Kafka cluster (environment → **Clusters** → **Confluent Platform**).
-2. Cloud Console: delete the access point and then the gateway (environment → **Network management**).
+1. CC UI: deregister the Connect cluster (if you did B6) and then the Kafka cluster (environment → **Clusters** → **Confluent Platform**).
+2. CC UI: delete the access point and then the gateway (environment → **Network management**).
 3. Azure Portal: delete resource group `rg-usm-lab`. This removes AKS (and its `MC_` group), the Private Endpoint and the DNS zone. If the `MC_` group won't delete, delete the Private Endpoint first.
-4. Cloud Console: delete the service account `sa-usm-agent-lab` and its API key. Delete the downloaded JSON.
+4. CC UI: delete the service account `sa-usm-agent-lab` and its API key. Delete the downloaded JSON.
 
 <details><summary>CLI alternative</summary>
 

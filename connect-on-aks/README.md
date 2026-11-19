@@ -7,7 +7,7 @@ A step-by-step demo for a **different scenario** than [`cp-on-aks`](../cp-on-aks
 - **Phase B:** add USM: Private Link, the USM Agent, register the Connect cluster, point Connect at the agent.
 
 **How the steps work**
-- Azure and Confluent Cloud steps use the **Portal / Cloud Console**. The CLI version is in a collapsed *CLI alternative* note.
+- Azure and Confluent Cloud steps use the **Portal / CC UI**. The CLI version is in a collapsed *CLI alternative* note.
 - Kubernetes steps use `kubectl` and `helm`. Run them from this folder (`connect-on-aks/`); the manifest paths are relative to it.
 
 ---
@@ -47,13 +47,6 @@ A step-by-step demo for a **different scenario** than [`cp-on-aks`](../cp-on-aks
 
 ---
 
-## Architecture
-
-- **Two separate paths leave AKS.** Phase A builds only the data path; Phase B adds the USM path:
-  - **Data path (public internet):** Connect produces to and consumes from the Confluent Cloud Kafka cluster (SASL_SSL, API key) and uses Confluent Cloud Schema Registry (HTTPS, API key). The Connect internal topics (configs, offsets, status) live in Confluent Cloud too.
-  - **USM path (Azure Private Link):** Connect workers send connector metadata and metrics to the **USM Agent** in the same AKS cluster. The agent forwards them to Confluent Cloud over Private Link.
-- **No Confluent Platform Kafka.** In USM terms, the Confluent Cloud cluster is the Connect cluster's **metadata cluster**. Only the Connect cluster is registered; the Cloud Kafka cluster needs no registration.
-- **Private networking is mandatory for USM, even with a public Kafka cluster.** On Azure: an **Ingress PrivateLink Gateway** and an **Access Point** in Confluent Cloud, a **Private Endpoint** in the AKS VNet, and a **Private DNS zone**.
 
 ---
 
@@ -66,34 +59,14 @@ A step-by-step demo for a **different scenario** than [`cp-on-aks`](../cp-on-aks
 | CFK | **3.3.1** (Helm chart `0.1718.99`) | |
 | Datagen connector | 0.7.2 | |
 
-**Confluent Cloud Kafka cluster** (created [below](#confluent-cloud-kafka-cluster))
-- **Standard** cluster, public endpoint, **Azure germanywestcentral** (the same region as the USM Private Link).
+**Confluent Cloud Kafka cluster**
+- **Standard** cluster, public endpoint in the same region as the USM Private Link.
 - Any cluster type works for Connect itself. Enterprise has no public endpoint, so it doesn't fit this variant. The USM docs list no cluster-type requirement, only that the cluster runs on **Azure or AWS**.
 
 **Accounts**
 - **Confluent Cloud:** `OrgAdmin`, plus an environment with the **Advanced** Stream Governance package.
 - **Azure:** a subscription where you can create AKS, private endpoints and private DNS zones (Contributor is enough).
 - **Outbound internet** from the AKS nodes. Connect needs it for Confluent Hub (plugin download) and for the public Kafka and Schema Registry endpoints. AKS allows outbound traffic by default.
-
-### Confluent Cloud Kafka cluster
-
-Create the cluster before you start. Connect needs it in Phase A, and USM uses it as the Connect cluster's metadata cluster in Phase B.
-
-1. CC UI → **Environments** → your environment (Advanced governance) → **Add cluster**.
-2. Type **Standard**, provider **Microsoft Azure**, region **Germany West Central (germanywestcentral)**, single zone is fine for the lab.
-3. Name it, e.g. `connect-lab`, and **Launch cluster**.
-4. Note three values:
-
-| Value | Where | Example |
-|---|---|---|
-| **Cluster ID** | Cluster → **Cluster settings** → **General** | `lkc-xxxxxx` |
-| **Bootstrap server** | Cluster → **Cluster settings** → **Endpoints** | `pkc-xxxxx.germanywestcentral.azure.confluent.cloud:9092` |
-| **Schema Registry endpoint** | Environment → **Schema Registry** (right side panel / *Stream Governance API*) | `https://psrc-xxxxx.germanywestcentral.azure.confluent.cloud` |
-
-```bash
-export CC_ENV_ID="env-xxxxxx"
-export CC_KAFKA_ID="lkc-xxxxxx"
-```
 
 You put the **bootstrap server** and the **Schema Registry endpoint** directly into the YAML files in A6 and A7.
 
@@ -108,8 +81,6 @@ confluent kafka cluster describe "$CC_KAFKA_ID" --environment "$CC_ENV_ID"     #
 confluent schema-registry cluster describe --environment "$CC_ENV_ID"           # Endpoint URL, Cluster ID (lsrc-…)
 ```
 </details>
-
-✅ **Check:** the cluster `connect-lab` shows **Running** in the Cloud Console.
 
 ---
 
@@ -326,8 +297,6 @@ The wizard sets up private networking, creates the agent's service account and A
 **1. Start the wizard**
 CC UI → **Environments** → your environment → **Clusters** → `connect-lab` → **Connectors** → **Self-managed** → **Register Connect cluster** → **New agent** → **Get started**.
 
-<!-- TODO screenshot: wizard start from Connectors → Self-managed -->
-
 > ℹ️ The wizard ends by asking for the Connect cluster ID. Stop after the configuration file (step 7): deploy the agent first (B2–B3), then come back in [B4](#b4-register-the-connect-cluster) with **Existing agent**.
 
 **2. Network: create the gateway**
@@ -354,7 +323,7 @@ The endpoint you just created is only a **connection request** to Confluent. Its
 
 1. Back in the wizard, paste the endpoint's **Resource ID** and create the access point.
 2. Wait until the access point shows **Ready** (a few minutes).
-3. Note the **access point ID**. It starts with `ap-` (e.g. `ap-d70o3n`), and you need it for the DNS zone name in step 5. Find it in the Cloud Console: your Private Link → **Access points** → **ID** column.
+3. Note the **access point ID**. It starts with `ap-` (e.g. `ap-d70o3n`), and you need it for the DNS zone name in step 5. Find it in the CC UI: your Private Link → **Access points** → **ID** column.
 4. In Azure, the endpoint → **Overview** → connection status now shows **Approved**.
 
 > ℹ️ **Two different IDs.** The **Resource ID** comes from Azure (`/subscriptions/…/privateEndpoints/<name>`). You paste it into the wizard. The **access point ID** comes from Confluent Cloud (`ap-…`). It goes into the DNS zone name in step 5, **without the hyphen**.
@@ -499,8 +468,6 @@ Registering maps the self-managed Connect cluster to the Cloud Kafka cluster `co
 2. CC UI → `connect-lab` → **Connectors** → **Self-managed** → **Register Connect cluster** → **Existing agent** → **Get started**.
 3. Select the network configuration from B1, enter the group ID → **Submit**.
 
-<!-- TODO screenshot: register Connect cluster -->
-
 <details><summary>CLI alternative</summary>
 
 ```bash
@@ -542,18 +509,18 @@ kubectl -n confluent get pods -w      # wait until connect-0 is Running/Ready ag
 > ### Checkpoint B: self-managed Connect is monitored in Confluent Cloud
 > - ✅ Connect on AKS uses Confluent Cloud Kafka and Schema Registry
 > - ✅ The USM Agent connects to Confluent Cloud over Azure Private Link
-> - ✅ The connector `datagen-pageviews` is visible under **Self-managed** in the Cloud Console
+> - ✅ The connector `datagen-pageviews` is visible under **Self-managed** in the CC UI
 
 ---
 
 ## Cleanup
 
 1. Delete the connector so Datagen stops producing: `kubectl -n confluent delete connector datagen-pageviews`.
-2. Cloud Console: deregister the Connect cluster (`connect-lab` → **Connectors** → **Self-managed**).
-3. Cloud Console: delete the access point and then the gateway (environment → **Network management**).
-4. Cloud Console: delete the cluster `connect-lab`. This removes `pageviews` and the Connect internal topics. Delete the subject `pageviews-value` in Schema Registry.
+2. CC UI: deregister the Connect cluster (`connect-lab` → **Connectors** → **Self-managed**).
+3. CC UI: delete the access point and then the gateway (environment → **Network management**).
+4. CC UI: delete the cluster `connect-lab`. This removes `pageviews` and the Connect internal topics. Delete the subject `pageviews-value` in Schema Registry.
 5. Azure Portal: delete resource group `rg-usm-lab`. This removes AKS (and its `MC_` group), the Private Endpoint and the DNS zone. If the `MC_` group won't delete, delete the Private Endpoint first.
-6. Cloud Console: delete the service accounts `sa-usm-agent-lab` and `sa-connect-lab` with their API keys. Delete the downloaded JSON.
+6. CC UI: delete the service accounts `sa-usm-agent-lab` and `sa-connect-lab` with their API keys. Delete the downloaded JSON.
 
 <details><summary>CLI alternative</summary>
 
