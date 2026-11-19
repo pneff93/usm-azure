@@ -1,0 +1,29 @@
+# Datagen connector producing Avro "pageviews" records into the Confluent Cloud
+# topic "pageviews" (create the topic in CC first, see README A3).
+# The Avro converter registers the value schema in CC Schema Registry
+# (subject: pageviews-value).
+# Before applying, replace value.converter.schema.registry.url with your CC
+# Schema Registry endpoint (same as in 10-connect.yaml).
+# Apply with:  kubectl apply -f k8s/11-datagen-connector.yaml
+# The ${file:...} references stay as they are; the Connect worker resolves them
+# from the mounted secret ccloud-sr-connector-cred.
+apiVersion: platform.confluent.io/v1beta1
+kind: Connector
+metadata:
+  name: datagen-pageviews
+  namespace: confluent
+spec:
+  class: io.confluent.kafka.connect.datagen.DatagenConnector
+  taskMax: 1
+  connectClusterRef:
+    name: connect
+  configs:
+    kafka.topic: pageviews
+    quickstart: pageviews
+    key.converter: org.apache.kafka.connect.storage.StringConverter
+    value.converter: io.confluent.connect.avro.AvroConverter
+    value.converter.schema.registry.url: https://psrc-48wlme8.germanywestcentral.azure.confluent.cloud
+    value.converter.basic.auth.credentials.source: USER_INFO
+    value.converter.basic.auth.user.info: "${file:/mnt/secrets/ccloud-sr-connector-cred/basic.txt:username}:${file:/mnt/secrets/ccloud-sr-connector-cred/basic.txt:password}"
+    max.interval: "500"
+    iterations: "100000000"

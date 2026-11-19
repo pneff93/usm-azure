@@ -1,0 +1,24 @@
+# USM Agent. Single outbound path from the self-managed Connect cluster to
+# Confluent Cloud (USM control plane), over Azure Private Link.
+# Apply with:  envsubst '$CC_FRONTDOOR_URL $CC_ENV_ID' < k8s/20-usmagent.yaml | kubectl apply -f -
+#   ${CC_FRONTDOOR_URL} -> "FRONTDOOR_URL" from the agent config JSON
+#   ${CC_ENV_ID}        -> "ENVIRONMENT_ID" from the agent config JSON
+# No externalAccess: Connect runs in the same AKS cluster and reaches the agent via
+# the in-cluster Service usm-agent.confluent.svc.cluster.local:10000.
+apiVersion: platform.confluent.io/v1beta1
+kind: USMAgent
+metadata:
+  name: usm-agent
+  namespace: confluent
+spec:
+  replicas: 1
+  image:
+    application: confluentinc/cp-usm-agent:1.2.1
+    init: confluentinc/confluent-init-container:3.3.1
+  confluentCloudClient:
+    endpoint: ${CC_FRONTDOOR_URL}   # e.g. https://api-apxxxxxx.germanywestcentral.azure.accesspoint.glb.confluent.cloud:443
+    environmentId: ${CC_ENV_ID}     # e.g. env-xxxxxx
+    authentication:
+      type: basic
+      basic:
+        secretRef: usm-ccloud-cred

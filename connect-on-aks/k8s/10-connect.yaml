@@ -1,0 +1,58 @@
+# Self-managed Kafka Connect on AKS, bootstrapping against a Confluent Cloud
+# Kafka cluster (public endpoint) and Confluent Cloud Schema Registry.
+# Datagen plugin is installed from Confluent Hub at pod start (needs outbound
+# internet from the AKS nodes).
+# Before applying, replace the two Confluent Cloud endpoints below with your own:
+#   bootstrapEndpoint -> bootstrap server of the CC cluster (pkc-....:9092)
+#   schemaRegistry.url -> CC Schema Registry endpoint (https://psrc-...)
+# Apply with:  kubectl apply -f k8s/10-connect.yaml
+# Phase A: no USM yet. Phase B applies 21-connect-usm.yaml, which is identical
+# plus the usmAgentClient block.
+apiVersion: platform.confluent.io/v1beta1
+kind: Connect
+metadata:
+  name: connect
+  namespace: confluent
+spec:
+  replicas: 1
+  image:
+    application: confluentinc/cp-server-connect:8.2.4
+    init: confluentinc/confluent-init-container:3.3.1
+  build:
+    type: onDemand
+    onDemand:
+      plugins:
+        locationType: confluentHub
+        confluentHub:
+          - name: kafka-connect-datagen
+            owner: confluentinc
+            version: 0.7.2
+  # --- CC --- mounted at /mnt/secrets/ccloud-sr-connector-cred, used by the connector's
+  # Avro converter via ${file:...} (see 11-datagen-connector.yaml)
+  mountedSecrets:
+    - secretRef: ccloud-sr-connector-cred   # CFK can't mount a secret that is also
+                                            # used below (schemaRegistry), so a copy
+  # --- CC --- Confluent Cloud requires replication factor 3 for the internal topics
+  configOverrides:
+    server:
+      - config.storage.replication.factor=3
+      - offset.storage.replication.factor=3
+      - status.storage.replication.factor=3
+  dependencies:
+    # --- CC --- Kafka in Confluent Cloud: SASL_SSL with an API key
+    kafka:
+      bootstrapEndpoint: pkc-w7d6j.germanywestcentral.azure.confluent.cloud:9092
+      authentication:
+        type: plain
+        jaasConfig:
+          secretRef: ccloud-kafka-cred     # key plain.txt: username=<api-key> / password=<api-secret>
+      tls:
+        enabled: true
+        ignoreTrustStoreConfig: true       # CC certificates are signed by public CAs
+    # --- CC --- Schema Registry in Confluent Cloud
+    schemaRegistry:
+      url: https://psrc-48wlme8.germanywestcentral.azure.confluent.cloud
+      authentication:
+        type: basic
+        basic:
+          secretRef: ccloud-sr-cred        # key basic.txt: username=<api-key> / password=<api-secret>

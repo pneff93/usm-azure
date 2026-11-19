@@ -1,0 +1,58 @@
+# Phase B: Connect with USM. Identical to 10-connect.yaml plus the block
+# marked "--- USM ---" (rolling restart of the workers).
+# Before applying, replace the two Confluent Cloud endpoints below with your own:
+#   bootstrapEndpoint -> bootstrap server of the CC cluster (pkc-....:9092)
+#   schemaRegistry.url -> CC Schema Registry endpoint (https://psrc-...)
+# Apply with:  kubectl apply -f k8s/21-connect-usm.yaml
+# CP 8.2.4 is not affected by the "Connect metrics missing from USM" issue.
+apiVersion: platform.confluent.io/v1beta1
+kind: Connect
+metadata:
+  name: connect
+  namespace: confluent
+spec:
+  replicas: 1
+  image:
+    application: confluentinc/cp-server-connect:8.2.4
+    init: confluentinc/confluent-init-container:3.3.1
+  build:
+    type: onDemand
+    onDemand:
+      plugins:
+        locationType: confluentHub
+        confluentHub:
+          - name: kafka-connect-datagen
+            owner: confluentinc
+            version: 0.7.2
+  # --- CC --- mounted at /mnt/secrets/ccloud-sr-connector-cred, used by the connector's
+  # Avro converter via ${file:...} (see 11-datagen-connector.yaml)
+  mountedSecrets:
+    - secretRef: ccloud-sr-connector-cred   # CFK can't mount a secret that is also
+                                            # used below (schemaRegistry), so a copy
+  # --- CC --- Confluent Cloud requires replication factor 3 for the internal topics
+  configOverrides:
+    server:
+      - config.storage.replication.factor=3
+      - offset.storage.replication.factor=3
+      - status.storage.replication.factor=3
+  dependencies:
+    # --- CC --- Kafka in Confluent Cloud: SASL_SSL with an API key
+    kafka:
+      bootstrapEndpoint: pkc-w7d6j.germanywestcentral.azure.confluent.cloud:9092
+      authentication:
+        type: plain
+        jaasConfig:
+          secretRef: ccloud-kafka-cred     # key plain.txt: username=<api-key> / password=<api-secret>
+      tls:
+        enabled: true
+        ignoreTrustStoreConfig: true       # CC certificates are signed by public CAs
+    # --- CC --- Schema Registry in Confluent Cloud
+    schemaRegistry:
+      url: https://psrc-48wlme8.germanywestcentral.azure.confluent.cloud
+      authentication:
+        type: basic
+        basic:
+          secretRef: ccloud-sr-cred        # key basic.txt: username=<api-key> / password=<api-secret>
+    # --- USM --- workers send connector metadata and metrics to the agent
+    usmAgentClient:
+      url: http://usm-agent.confluent.svc.cluster.local:10000
